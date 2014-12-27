@@ -5,11 +5,13 @@
 #endif
 
 #include <ctype.h>
+#include <limits.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
@@ -67,9 +69,10 @@ get_password() { /* only run as root */
 
 int
 main(int argc, char **argv) {
+    time_t throttlestart;
     char curs[] = {0, 0, 0, 0, 0, 0, 0, 0};
     char buf[32], passwd[256], passdisp[256];
-    int num, screen, width, height, update, sleepmode, term, pid;
+    int num, screen, width, height, update, sleepmode, term, pid, nfailures;
 
 #ifndef HAVE_BSD_AUTH
     const char *pws;
@@ -81,7 +84,7 @@ main(int argc, char **argv) {
     KeySym ksym;
     Pixmap pmap;
     Window root, w;
-    XColor black, red, dummy;
+    XColor black, red, realred, dummy;
     XEvent ev;
     XSetWindowAttributes wa;
     XFontStruct* font;
@@ -93,6 +96,7 @@ main(int argc, char **argv) {
     char* fontname = "-*-dejavu sans-bold-r-*-*-*-420-100-100-*-*-iso8859-1";
     char* username = ""; 
     int showline = 1;
+    int maxfailures = INT_MAX;
 
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "-c")) {
@@ -115,7 +119,14 @@ main(int argc, char **argv) {
                         showline = 0;
                     else 
                         if (!strcmp(argv[i], "?")) 
-                            die("usage: sflock [-v] [-c passchars] [-f fontname]\n");
+                            die("usage: sflock [-v] [-c passchars] [-f fontname] [-t throttletries]\n");
+                        else
+                            if (!strcmp(argv[i], "-t")) {
+                                if (i + 1 < argc)
+                                    maxfailures = atoi(argv[i + 1]);
+                                else
+                                    die("error: no throttle tries given.\n");
+                            }
     }
 
     // fill with password characters
@@ -162,6 +173,7 @@ main(int argc, char **argv) {
             DefaultVisual(dpy, screen), CWOverrideRedirect | CWBackPixel, &wa);
 
     XAllocNamedColor(dpy, DefaultColormap(dpy, screen), "orange red", &red, &dummy);
+    XAllocNamedColor(dpy, DefaultColormap(dpy, screen), "red", &realred, &dummy);
     XAllocNamedColor(dpy, DefaultColormap(dpy, screen), "black", &black, &dummy);
     pmap = XCreateBitmapFromData(dpy, w, curs, 8, 8);
     invisible = XCreatePixmapCursor(dpy, pmap, pmap, &black, &black, 0, 0);
@@ -194,10 +206,12 @@ main(int argc, char **argv) {
         running = (len > 0);
     }
 
+    throttlestart = time(NULL);
     len = 0;
     XSync(dpy, False);
     update = True;
     sleepmode = False;
+    nfailures = 0;
 
     /* main event loop */
     while(running && !XNextEvent(dpy, &ev)) {
@@ -253,9 +267,21 @@ main(int argc, char **argv) {
 #else
                     running = strcmp(crypt(passwd, pws), pws);
 #endif
-                    if (running != 0)
+                    /* are we throttling? */
+                    if(nfailures >= maxfailures && difftime(time(NULL),throttlestart) < 5)
+                        running = 1;
+
+                    if (running != 0) {
+                        /* throttle after too many failures */
+                        nfailures++;
+                        if(nfailures >= maxfailures) {
+                            red = realred;
+                            throttlestart = time(NULL);
+                        }
+
                         // change background on wrong password
                         XSetWindowBackground(dpy, w, red.pixel);
+                    }
                     len = 0;
                     break;
                 case XK_Escape:
